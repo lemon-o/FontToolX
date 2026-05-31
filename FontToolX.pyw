@@ -654,14 +654,16 @@ class BuildThread(QThread):
         self.symbols = symbols
         self.save_file = save_file
         self.compress = compress
-        self.dedup_info = dedup_info  # 新增：保存去重信息
+        self.dedup_info = dedup_info
 
     def run(self):
-        tmp = "tmp_font.c"
+        import tempfile
+        tmp_dir = tempfile.gettempdir()
+        tmp = os.path.join(tmp_dir, "tmp_font.c")
+        
         try:
             lv = shutil.which("lv_font_conv") or "lv_font_conv"
             
-            # 构建命令参数
             cmd = [
                 lv, "--font", self.font,
                 "--size", str(self.size),
@@ -671,11 +673,11 @@ class BuildThread(QThread):
                 "-o", tmp
             ]
             
-            # 根据压缩选项决定是否添加 --no-compress
             if not self.compress:
-                cmd.insert(-2, "--no-compress")  # 在 -o 之前插入
+                cmd.insert(-2, "--no-compress")
             
-            r = subprocess.run(cmd, capture_output=True, text=True)
+            flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            r = subprocess.run(cmd, capture_output=True, text=True, creationflags=flags)
             
             if r.returncode != 0:
                 raise RuntimeError(r.stderr.strip() or "lv_font_conv 返回错误")
@@ -1254,12 +1256,15 @@ class FontTool(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", str(e))
         finally:
-            for f in [tmp, "tmp.c"]:
-                try:
-                    if os.path.exists(f): os.remove(f)
-                except: pass
+            # 修改：只删除传入的临时文件
+            try:
+                if os.path.exists(tmp): 
+                    os.remove(tmp)
+            except: 
+                pass
             self.btn_generate.setEnabled(True)
             self.btn_preview.setEnabled(True)
+
 
     def preview(self):
         """预览：生成临时文件用于预览，不保存"""
@@ -1323,10 +1328,11 @@ class FontTool(QMainWindow):
             self.set_status(f"✘  {e}", "err")
             QMessageBox.critical(self, "错误", str(e))
         finally:
-            for f in [tmp, "tmp.c"]:
-                try:
-                    if os.path.exists(f): os.remove(f)
-                except: pass
+            try:
+                if os.path.exists(tmp): 
+                    os.remove(tmp)
+            except: 
+                pass
             self.btn_generate.setEnabled(True)
             self.btn_preview.setEnabled(True)
 
