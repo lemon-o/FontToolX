@@ -947,7 +947,7 @@ class FontTool(QMainWindow):
         row_out = QHBoxLayout(); row_out.setSpacing(8)
         lbl_out = QLabel("输出目录"); lbl_out.setFixedWidth(70)
         self.le_out = QLineEdit(os.getcwd())
-        btn_out = QPushButton("选择字体"); btn_out.setObjectName("btn_sm")
+        btn_out = QPushButton("选择目录"); btn_out.setObjectName("btn_sm")
         btn_out.setFixedWidth(92); btn_out.clicked.connect(self.pick_out)
         row_out.addWidget(lbl_out); row_out.addWidget(self.le_out); row_out.addWidget(btn_out)
         gi.addLayout(row_out)
