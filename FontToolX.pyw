@@ -9,6 +9,7 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *
+from sympy import symbols
 
 
 # ─────────────────────── 路径辅助 ────────────────────────────────
@@ -663,12 +664,12 @@ class BuildThread(QThread):
         
         try:
             lv = shutil.which("lv_font_conv") or "lv_font_conv"
-            
+
             cmd = [
                 lv, "--font", self.font,
                 "--size", str(self.size),
                 "--bpp",  str(self.bpp),
-                "--symbols", self.symbols,
+                f"--symbols={self.symbols}",   # 用等号形式，避免 - 开头被误判为选项
                 "--format", "lvgl",
                 "-o", tmp
             ]
@@ -1406,6 +1407,16 @@ class FontTool(QMainWindow):
         font_size_px = self.sp_size.value()
         bpp = int(self.cb_bpp.currentText())
         
+        # ══════════════════════════════════════════════════════
+        #  从原始 .c 文件提取 line_height 和 base_line
+        #  这是计算 ofs_y 对齐偏移的关键参数，不能用 font_size_px 代替
+        # ══════════════════════════════════════════════════════
+        lh_match = re.search(r"\.line_height\s*=\s*(\d+)", content)
+        bl_match = re.search(r"\.base_line\s*=\s*(\d+)", content)
+        line_height = int(lh_match.group(1)) if lh_match else font_size_px
+        base_line   = int(bl_match.group(1)) if bl_match else 0
+        ascent      = line_height - base_line  # 基线以上的像素数（行顶到基线）
+
         # 使用传入的去重后的字符集，如果没有则从输入框读取
         if final_symbols is None:
             final_symbols = self.le_sym.text()
@@ -1474,6 +1485,38 @@ class FontTool(QMainWindow):
             real_bitmap_size = original_bitmap_size
             flash_total = original_bitmap_size + dsc_total
 
+        # ══════════════════════════════════════════════════════
+        #  将 ofs_y 从 LVGL 坐标系转换为行顶部相对坐标
+        #
+        #  LVGL 坐标系：ofs_y 以行底部为原点，向上为正
+        #               行底部 = 行顶部 + line_height
+        #               基线   = 行底部 + base_line（base_line 向上偏移）
+        #
+        #  目标坐标系：new_ofs_y 以行顶部为原点，向下为正
+        #              即字形顶部距行顶部的像素数
+        #
+        #  推导：
+        #    字形顶部（LVGL）= 基线 + ofs_y + box_h  （从基线向上 ofs_y+box_h）
+        #    基线距行顶部    = ascent = line_height - base_line
+        #    字形顶部距行顶部 = ascent - (ofs_y + box_h) = ascent - ofs_y - box_h
+        #
+        #  效果：渲染端直接用 draw_y = y + dsc.ofs_y + row，无需任何额外换算
+        # ══════════════════════════════════════════════════════
+        converted_dsc_entries = []
+        for entry in fixed_dsc_entries:
+            h_match = re.search(r'\.box_h\s*=\s*(\d+)', entry)
+            y_match = re.search(r'\.ofs_y\s*=\s*(-?\d+)', entry)
+
+            if h_match and y_match:
+                box_h     = int(h_match.group(1))
+                ofs_y     = int(y_match.group(1))
+                new_ofs_y = ascent - ofs_y - box_h
+                entry = re.sub(r'\.ofs_y\s*=\s*-?\d+', f'.ofs_y = {new_ofs_y}', entry)
+
+            converted_dsc_entries.append(entry)
+
+        fixed_dsc_entries = converted_dsc_entries
+
         # 格式化函数
         def format_size(size_bytes):
             if size_bytes < 1024:
@@ -1499,6 +1542,7 @@ class FontTool(QMainWindow):
             f.write(f" * 像素深度:   {bpp} BPP\n")
             f.write(f" * 字符数量:   {char_count} 个\n")
             f.write(f" * 字符集:     {final_symbols}\n")
+            f.write(f" * 行高:       {line_height}px  (ascent={ascent}, descent={base_line})\n")
             f.write(" * \n")
             f.write(" * Flash 占用估算:\n")
             
@@ -1524,9 +1568,9 @@ class FontTool(QMainWindow):
                 f.write(" * - 数据解压函数已包含在本文件中，可直接使用\n")
             else:
                 f.write(" * - 点阵数据未压缩，如需减小体积可启用压缩选项\n")
+            f.write(" * - ofs_y 已转换为行顶部相对值，渲染时直接用 y + ofs_y + row 即可\n")
             f.write(" */\n\n")
             
-            f.pragma = "#pragma once\n"
             f.write("#pragma once\n")
             f.write("#include <stdint.h>\n")
             f.write("#include <string.h>\n\n")
@@ -1541,6 +1585,15 @@ class FontTool(QMainWindow):
             f.write(f"/** @brief 字体大小 (像素) */\n")
             f.write(f"#define FONT_SIZE_PX      {font_size_px}\n\n")
             
+            f.write(f"/** @brief 行高 (像素，含上下边距) */\n")
+            f.write(f"#define FONT_LINE_HEIGHT  {line_height}\n\n")
+
+            f.write(f"/** @brief 基线以上高度 (行顶到基线的像素数) */\n")
+            f.write(f"#define FONT_ASCENT       {ascent}\n\n")
+
+            f.write(f"/** @brief 基线以下高度 (descent) */\n")
+            f.write(f"#define FONT_DESCENT      {base_line}\n\n")
+
             f.write(f"/** @brief 字符数量 */\n")
             f.write(f"#define FONT_CHAR_COUNT   {char_count}\n\n")
             
@@ -1593,6 +1646,7 @@ class FontTool(QMainWindow):
             # 字符描述符结构体
             f.write("/**\n")
             f.write(" * @brief 字符描述符结构体\n")
+            f.write(" * @note  ofs_y 为行顶部相对值（向下为正），渲染时直接用 y + ofs_y + row\n")
             f.write(" */\n")
             f.write("typedef struct {\n"
                     "    uint32_t bitmap_index;  /**< 点阵数据索引 */\n"
@@ -1600,7 +1654,7 @@ class FontTool(QMainWindow):
                     "    uint16_t box_w;         /**< 点阵宽度 */\n"
                     "    uint16_t box_h;         /**< 点阵高度 */\n"
                     "    int16_t  ofs_x;         /**< X 轴偏移 */\n"
-                    "    int16_t  ofs_y;         /**< Y 轴偏移 */\n"
+                    "    int16_t  ofs_y;         /**< Y 轴偏移 (行顶部相对值，向下为正) */\n"
                     "} GlyphDsc;\n\n")
             
             # ══════════════════════════════════════════════════════
@@ -1665,9 +1719,9 @@ class FontTool(QMainWindow):
                 f.write("};\n\n")
             
             # ══════════════════════════════════════════════════════
-            #  字符描述符数组（压缩模式使用重新计算的偏移）
+            #  字符描述符数组（ofs_y 已转换为行顶部相对值）
             # ══════════════════════════════════════════════════════
-            f.write(f"/** @brief 字符描述符数组 ({char_count} 个字符) */\n")
+            f.write(f"/** @brief 字符描述符数组 ({char_count} 个字符，ofs_y 已转换为行顶部相对值) */\n")
             f.write(f"static const GlyphDsc glyph_dsc[{char_count}] = {{\n")
             for i, entry_clean in enumerate(fixed_dsc_entries):
                 comma = "," if i < len(fixed_dsc_entries) - 1 else ""
@@ -1703,56 +1757,58 @@ class FontTool(QMainWindow):
                 f.write(" * \n")
                 f.write(" * // 2. 初始化时解压一次\n")
                 f.write(" * void font_init(void) {\n")
-                f.write(" * glyph_decompress(glyph_bitmap_compressed, glyph_buffer);\n")
+                f.write(" *     glyph_decompress(glyph_bitmap_compressed, glyph_buffer);\n")
                 f.write(" * }\n")
                 f.write(" * \n")
                 f.write(" * // 3. 渲染时使用\n")
-                f.write(" * void draw_char(uint32_t unicode, uint16_t x, uint16_t y) {\n")
-                f.write(" * int16_t idx = font_find_char(unicode);\n")
-                f.write(" * if (idx < 0) return;\n")
+                f.write(" * //    x, y 为行顶部左上角坐标\n")
+                f.write(" * //    ofs_y 已是行顶部相对值，直接相加即可，无需基线换算\n")
+                f.write(" * void draw_char(uint32_t unicode, int x, int y) {\n")
+                f.write(" *     int16_t idx = font_find_char(unicode);\n")
+                f.write(" *     if (idx < 0) return;\n")
                 f.write(" * \n")
-                f.write(" * GlyphDsc *dsc = &glyph_dsc[idx];\n")
-                f.write(" * uint8_t *bitmap = &glyph_buffer[dsc->bitmap_index];\n")
+                f.write(" *     const GlyphDsc *dsc = &glyph_dsc[idx];\n")
+                f.write(" *     const uint8_t *bitmap = &glyph_buffer[dsc->bitmap_index];\n")
                 f.write(" * \n")
-                f.write(" * for (int row = 0; row < dsc->box_h; row++) {\n")
-                f.write(" * for (int col = 0; col < dsc->box_w; col++) {\n")
-                f.write(" * int pixel_idx = row * dsc->box_w + col;\n")
-                f.write(" * int byte_idx = pixel_idx / FONT_PIXELS_PER_BYTE;\n")
-                f.write(" * int bit_pos = pixel_idx % FONT_PIXELS_PER_BYTE;\n")
-                f.write(" * uint8_t pixel = FONT_GET_PIXEL(bitmap[byte_idx], bit_pos);\n")
-                f.write(" * \n")
-                f.write(" * if (pixel > 0) {\n")
-                f.write(" * draw_pixel(x + dsc->ofs_x + col, \n")
-                f.write(" * y + dsc->ofs_y + row, pixel);\n")
-                f.write(" * }\n")
-                f.write(" * }\n")
-                f.write(" * }\n")
+                f.write(" *     for (int row = 0; row < dsc->box_h; row++) {\n")
+                f.write(" *         for (int col = 0; col < dsc->box_w; col++) {\n")
+                f.write(" *             int pixel_idx = row * dsc->box_w + col;\n")
+                f.write(" *             int byte_idx  = pixel_idx / FONT_PIXELS_PER_BYTE;\n")
+                f.write(" *             int bit_pos   = pixel_idx % FONT_PIXELS_PER_BYTE;\n")
+                f.write(" *             uint8_t pixel = FONT_GET_PIXEL(bitmap[byte_idx], bit_pos);\n")
+                f.write(" *             if (pixel > 0) {\n")
+                f.write(" *                 draw_pixel(x + dsc->ofs_x + col,\n")
+                f.write(" *                            y + dsc->ofs_y + row, pixel);\n")
+                f.write(" *             }\n")
+                f.write(" *         }\n")
+                f.write(" *     }\n")
                 f.write(" * }\n")
                 f.write(" */\n")
             else:
                 f.write("/**\n")
                 f.write(" * @brief 使用示例（固件端）\n")
                 f.write(" * \n")
-                f.write(" * void draw_char(uint32_t unicode, uint16_t x, uint16_t y) {\n")
-                f.write(" * int16_t idx = font_find_char(unicode);\n")
-                f.write(" * if (idx < 0) return;\n")
+                f.write(" * //    x, y 为行顶部左上角坐标\n")
+                f.write(" * //    ofs_y 已是行顶部相对值，直接相加即可，无需基线换算\n")
+                f.write(" * void draw_char(uint32_t unicode, int x, int y) {\n")
+                f.write(" *     int16_t idx = font_find_char(unicode);\n")
+                f.write(" *     if (idx < 0) return;\n")
                 f.write(" * \n")
-                f.write(" * GlyphDsc *dsc = &glyph_dsc[idx];\n")
-                f.write(" * uint8_t *bitmap = &glyph_bitmap[dsc->bitmap_index];\n")
+                f.write(" *     const GlyphDsc *dsc = &glyph_dsc[idx];\n")
+                f.write(" *     const uint8_t *bitmap = &glyph_bitmap[dsc->bitmap_index];\n")
                 f.write(" * \n")
-                f.write(" * for (int row = 0; row < dsc->box_h; row++) {\n")
-                f.write(" * for (int col = 0; col < dsc->box_w; col++) {\n")
-                f.write(" * int pixel_idx = row * dsc->box_w + col;\n")
-                f.write(" * int byte_idx = pixel_idx / FONT_PIXELS_PER_BYTE;\n")
-                f.write(" * int bit_pos = pixel_idx % FONT_PIXELS_PER_BYTE;\n")
-                f.write(" * uint8_t pixel = FONT_GET_PIXEL(bitmap[byte_idx], bit_pos);\n")
-                f.write(" * \n")
-                f.write(" * if (pixel > 0) {\n")
-                f.write(" * draw_pixel(x + dsc->ofs_x + col,\n")
-                f.write(" * y + dsc->ofs_y + row, pixel);\n")
-                f.write(" * }\n")
-                f.write(" * }\n")
-                f.write(" * }\n")
+                f.write(" *     for (int row = 0; row < dsc->box_h; row++) {\n")
+                f.write(" *         for (int col = 0; col < dsc->box_w; col++) {\n")
+                f.write(" *             int pixel_idx = row * dsc->box_w + col;\n")
+                f.write(" *             int byte_idx  = pixel_idx / FONT_PIXELS_PER_BYTE;\n")
+                f.write(" *             int bit_pos   = pixel_idx % FONT_PIXELS_PER_BYTE;\n")
+                f.write(" *             uint8_t pixel = FONT_GET_PIXEL(bitmap[byte_idx], bit_pos);\n")
+                f.write(" *             if (pixel > 0) {\n")
+                f.write(" *                 draw_pixel(x + dsc->ofs_x + col,\n")
+                f.write(" *                            y + dsc->ofs_y + row, pixel);\n")
+                f.write(" *             }\n")
+                f.write(" *         }\n")
+                f.write(" *     }\n")
                 f.write(" * }\n")
                 f.write(" */\n")
         
