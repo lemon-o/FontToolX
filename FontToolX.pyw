@@ -5,11 +5,9 @@ import shutil
 import sys
 import json
 from PyQt5.QtGui import QIcon
-
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *
-from sympy import symbols
 
 
 # ─────────────────────── 路径辅助 ────────────────────────────────
