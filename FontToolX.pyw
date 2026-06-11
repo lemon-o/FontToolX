@@ -22,6 +22,51 @@ def _app_dir() -> str:
         # 打包后 sys.executable 就是 exe 本身
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+def sanitize_c_identifier(name: str) -> str:
+    """
+    将字符串转换为合法的C标识符
+    规则：
+    - 只能包含字母、数字、下划线
+    - 不能以数字开头
+    - 替换非法字符为下划线
+    - 保留中文字符（转换为拼音或忽略），这里统一替换为下划线
+    """
+    if not name:
+        return "_font"
+    
+    # 将非ASCII字符（包括中文）替换为下划线
+    ascii_name = re.sub(r'[^\x00-\x7F]+', '_', name)
+    
+    # 确保只保留字母、数字、下划线
+    sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', ascii_name)
+    
+    # 压缩连续下划线
+    sanitized = re.sub(r'_+', '_', sanitized)
+    
+    # 去除首尾下划线
+    sanitized = sanitized.strip('_')
+    
+    # 如果以数字开头，添加前缀
+    if sanitized and sanitized[0].isdigit():
+        sanitized = '_' + sanitized
+    
+    # 如果为空，使用默认值
+    if not sanitized:
+        sanitized = "font"
+    
+    # 确保不是C关键字（简单处理）
+    c_keywords = {
+        'auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do',
+        'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if',
+        'int', 'long', 'register', 'return', 'short', 'signed', 'sizeof',
+        'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void',
+        'volatile', 'while', 'inline', 'restrict'
+    }
+    if sanitized.lower() in c_keywords:
+        sanitized = sanitized + "_font"
+    
+    return sanitized
 # ══════════════════════════════════════════════════════════════════
 #  样式表
 # ══════════════════════════════════════════════════════════════════
@@ -1367,7 +1412,9 @@ class FontTool(QMainWindow):
 
     # ─────────────────────────────────────────────
     def make_header(self, tmp_file, out_dir, final_symbols=None):
-        name = os.path.splitext(os.path.basename(self.le_font.text()))[0]
+        raw_name = os.path.splitext(os.path.basename(self.le_font.text()))[0]
+        # 转换为合法的C标识符作为文件名基础
+        name = sanitize_c_identifier(raw_name)
         compress = self.cb_compress.isChecked()
         
         if compress:
