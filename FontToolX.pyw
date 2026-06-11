@@ -683,6 +683,123 @@ class EnvCheckDialog(QDialog):
             # sys.argv 是当前启动的参数，确保重启后参数一致
             os.execl(python, python, *sys.argv)
 
+# 用于字符检查
+class FontCharChecker(QThread):
+    finished = pyqtSignal(list, list)  # (valid_chars, invalid_chars)
+    error = pyqtSignal(str)
+    
+    def __init__(self, font_path, symbols):
+        super().__init__()
+        self.font_path = font_path
+        self.symbols = symbols
+    
+    def run(self):
+        """使用 fontforge 或系统字体工具检查字符是否存在"""
+        try:
+            import subprocess
+            import sys
+            
+            valid_chars = []
+            invalid_chars = []
+            
+            # 方法1: 尝试使用 Python 的 fontTools 库（如果可用）
+            try:
+                from fontTools.ttLib import TTFont
+                from fontTools.unicode import Unicode
+                
+                with TTFont(self.font_path) as font:
+                    # 获取字体中所有可用的 glyph
+                    cmap = font.getBestCmap()
+                    available_chars = set(cmap.keys())
+                    
+                    for char in self.symbols:
+                        code_point = ord(char)
+                        if code_point in available_chars:
+                            valid_chars.append(char)
+                        else:
+                            invalid_chars.append(char)
+                    
+                    self.finished.emit(valid_chars, invalid_chars)
+                    return
+            except ImportError:
+                # fontTools 未安装，尝试其他方法
+                pass
+            
+            # 方法2: 使用系统命令检查（Windows 使用 fc-query/fc-list，但需要 freetype）
+            # 这里实现一个简化的回退方案：依赖 lv_font_conv 的错误输出来判断
+            # 但为了提前检测，我们使用一个快速的测试命令
+            try:
+                import tempfile
+                lv = shutil.which("lv_font_conv") or "lv_font_conv"
+                
+                # 分批测试字符（避免命令行过长）
+                batch_size = 100
+                all_valid = []
+                all_invalid = []
+                
+                for i in range(0, len(self.symbols), batch_size):
+                    batch = self.symbols[i:i+batch_size]
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                        f.write(batch)
+                        temp_sym_file = f.name
+                    
+                    try:
+                        # 使用 --list 或生成一个临时文件来测试
+                        cmd = [
+                            lv, "--font", self.font_path,
+                            "--size", "12",
+                            f"--symbols={batch}",
+                            "--format", "lvgl",
+                            "-o", tempfile.NamedTemporaryFile(suffix='.c').name,
+                            "--no-compress"
+                        ]
+                        
+                        result = subprocess.run(
+                            cmd, 
+                            capture_output=True, 
+                            text=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                        )
+                        
+                        # 解析 stderr 中缺失的字符信息
+                        if result.returncode != 0:
+                            # lv_font_conv 会报告哪些字符缺失
+                            stderr = result.stderr
+                            # 尝试从错误信息中提取缺失字符
+                            import re
+                            missing_pattern = r"Character '(.+?)' \(U\+[0-9A-F]+\) not found in font"
+                            missing = re.findall(missing_pattern, stderr)
+                            for char in batch:
+                                if char not in missing:
+                                    all_valid.append(char)
+                                else:
+                                    all_invalid.append(char)
+                        else:
+                            # 执行成功，说明所有字符都存在
+                            all_valid.extend(batch)
+                    except:
+                        # 出错时假设所有字符都存在（让 lv_font_conv 自己处理）
+                        all_valid.extend(batch)
+                    finally:
+                        try:
+                            os.unlink(temp_sym_file)
+                        except:
+                            pass
+                
+                self.finished.emit(all_valid, all_invalid)
+                return
+                
+            except Exception as e:
+                self.error.emit(str(e))
+                return
+                
+        except Exception as e:
+            self.error.emit(str(e))
+    
+    def check_char_with_lv_font_conv(self):
+        """使用 lv_font_conv 的 --list 或直接尝试生成来检查"""
+        pass
+
 # ══════════════════════════════════════════════════════════════════
 #  后台生成线程
 # ══════════════════════════════════════════════════════════════════
@@ -706,6 +823,21 @@ class BuildThread(QThread):
         tmp = os.path.join(tmp_dir, "tmp_font.c")
         
         try:
+            #过滤字体中不存在的字符
+            from fontTools.ttLib import TTFont
+            tt = TTFont(self.font)
+
+            # 合并所有 cmap 表的字符覆盖，避免遗漏非标准编码
+            all_codepoints = set()
+            for table in tt['cmap'].tables:
+                all_codepoints.update(table.cmap.keys())
+
+            if all_codepoints:
+                missing = [c for c in self.symbols if ord(c) not in all_codepoints]
+                if missing:
+                    self.warning.emit(f"以下字符在字体中不存在，已自动排除：{''.join(missing)}")
+                filtered_symbols = ''.join(c for c in self.symbols if ord(c) in all_codepoints)
+            
             lv = shutil.which("lv_font_conv") or "lv_font_conv"
 
             cmd = [
@@ -1199,58 +1331,33 @@ class FontTool(QMainWindow):
     def build(self):
         font = self.le_font.text().strip()
         if not font or not os.path.exists(font):
-            QMessageBox.warning(self, "提示", "请先选择有效的字体文件"); return
+            QMessageBox.warning(self, "提示", "请先选择有效的字体文件")
+            return
         if not check_lv_font_conv():
-            QMessageBox.warning(self, "提示", "未找到 lv_font_conv，请在环境检测中安装"); return
-
+            QMessageBox.warning(self, "提示", "未找到 lv_font_conv，请在环境检测中安装")
+            return
+        
+        # 保存设置
         self.save_settings()
-
+        
+        # 获取并检查字符
+        symbols = self.le_sym.text()
+        if not symbols:
+            QMessageBox.warning(self, "提示", "请输入要生成的字符")
+            return
+        
+        # 禁用按钮
         self.btn_generate.setEnabled(False)
         self.btn_preview.setEnabled(False)
-        self._last_pixmap = None
-
-        symbols = self.le_sym.text()
-        original_len = len(symbols)
-        total_removed = 0
         
-        # 字符去重（保持原有顺序）
-        deduped_symbols = ''.join(dict.fromkeys(symbols))
-        removed_count = original_len - len(deduped_symbols)
-        total_removed += removed_count
+        # 启动字符检查线程
+        self.char_checker = FontCharChecker(font, symbols)
+        self.char_checker.finished.connect(lambda valid, invalid: self.on_char_check_done(valid, invalid, save_file=True))
+        self.char_checker.error.connect(self.on_char_check_error)
+        self.char_checker.start()
         
-        # 更新输入框
-        if deduped_symbols != symbols:
-            self.le_sym.setText(deduped_symbols)
-            symbols = deduped_symbols
-        
-        if sys.platform == "win32":
-            problematic_chars = set('><|&^')
-            removed = [c for c in symbols if c in problematic_chars]
-            if removed:
-                filtered = ''.join(c for c in symbols if c not in problematic_chars)
-                symbols = filtered
-                self.le_sym.setText(filtered)
-                total_removed += len(removed)
-        
-        # 存储去重信息（使用最终的去重总数）
-        dedup_info = {
-            'removed': total_removed,
-            'original_len': original_len,
-            'new_len': len(symbols)
-        }
-        
-        self._build_thread = BuildThread(
-            font, 
-            self.sp_size.value(),
-            int(self.cb_bpp.currentText()),
-            symbols,
-            save_file=True,
-            compress=self.cb_compress.isChecked(),
-            dedup_info=dedup_info  # 传递去重信息
-        )
-        self._build_thread.finished.connect(self.on_built)
-        self._build_thread.error.connect(self.on_error)
-        self._build_thread.start()
+        # 显示进度提示
+        self.statusBar().showMessage("正在检查字符是否存在于字体文件中...")
 
     def on_built(self, tmp, save_file):
         try:
@@ -1314,51 +1421,29 @@ class FontTool(QMainWindow):
         """预览：生成临时文件用于预览，不保存"""
         font = self.le_font.text().strip()
         if not font or not os.path.exists(font):
-            QMessageBox.warning(self, "提示", "请先选择有效的字体文件"); return
+            QMessageBox.warning(self, "提示", "请先选择有效的字体文件")
+            return
         if not check_lv_font_conv():
-            QMessageBox.warning(self, "提示", "未找到 lv_font_conv，请在环境检测中安装"); return
-
+            QMessageBox.warning(self, "提示", "未找到 lv_font_conv，请在环境检测中安装")
+            return
+        
         self.save_settings()
-
+        
+        symbols = self.le_sym.text()
+        if not symbols:
+            QMessageBox.warning(self, "提示", "请输入要生成的字符")
+            return
+        
         self.btn_generate.setEnabled(False)
         self.btn_preview.setEnabled(False)
-        self._last_pixmap = None
-
-        symbols = self.le_sym.text()
-        # 字符去重（保持原有顺序）
-        deduped_symbols = ''.join(dict.fromkeys(symbols))
         
-        # 如果去重后变了，更新输入框并提示用户
-        if deduped_symbols != symbols:
-            self.le_sym.setText(deduped_symbols)
-            QMessageBox.information(self, "提示", 
-                f"已自动去除重复字符\n\n"
-                f"原字符数: {len(symbols)}\n"
-                f"去重后: {len(deduped_symbols)} 个")
-            symbols = deduped_symbols
+        # 启动字符检查线程
+        self.char_checker = FontCharChecker(font, symbols)
+        self.char_checker.finished.connect(lambda valid, invalid: self.on_char_check_done(valid, invalid, save_file=False))
+        self.char_checker.error.connect(self.on_char_check_error)
+        self.char_checker.start()
         
-        if sys.platform == "win32":
-            problematic_chars = set('><|&^')
-            removed = [c for c in symbols if c in problematic_chars]
-            if removed:
-                filtered = ''.join(c for c in symbols if c not in problematic_chars)
-                QMessageBox.information(self, "提示", 
-                    f"以下字符无法处理，已自动移除：\n{''.join(set(removed))}")
-                symbols = filtered
-                self.le_sym.setText(filtered)  # 同步更新输入框
-
-        # 预览时始终不压缩（保证预览正常）
-        self._build_thread = BuildThread(
-            font, 
-            self.sp_size.value(),
-            int(self.cb_bpp.currentText()),
-            symbols,
-            save_file=False,
-            compress=False
-        )
-        self._build_thread.finished.connect(self.on_preview_done)
-        self._build_thread.error.connect(self.on_preview_error)
-        self._build_thread.start()
+        self.statusBar().showMessage("正在检查字符是否存在于字体文件中...")
 
     def on_preview_done(self, tmp, save_file):
         """预览生成完成"""
@@ -1386,6 +1471,150 @@ class FontTool(QMainWindow):
         QMessageBox.critical(self, "预览失败", msg)
         self.btn_generate.setEnabled(True)
         self.btn_preview.setEnabled(True)
+        
+    def on_char_check_done(self, valid_chars, invalid_chars, save_file):
+        """字符检查完成后的回调"""
+        self.statusBar().clearMessage()
+        
+        # 如果有无效字符
+        if invalid_chars:
+            # 去重
+            unique_invalid = []
+            seen = set()
+            for c in invalid_chars:
+                if c not in seen:
+                    seen.add(c)
+                    unique_invalid.append(c)
+            
+            # 更新输入框，移除无效字符
+            new_symbols = ''.join(valid_chars)
+            self.le_sym.setText(new_symbols)
+            
+            # 构建提示消息（与去除重复字符样式一致）
+            removed_count = len(unique_invalid)
+            msg_text = f"已自动移除 {removed_count} 个不在字体文件中的字符"
+            
+            # 显示详细信息（可选，与重复字符提示类似）
+            QMessageBox.information(self, "提示", msg_text)
+            
+            # 如果没有有效字符了
+            if not new_symbols:
+                QMessageBox.warning(self, "提示", "所有字符都不在字体文件中，无法生成字库！")
+                self.btn_generate.setEnabled(True)
+                self.btn_preview.setEnabled(True)
+                return
+        
+        # 继续执行生成或预览
+        if save_file:
+            self.do_build()
+        else:
+            self.do_preview()
+
+    def on_char_check_error(self, error_msg):
+        """字符检查出错时的回调"""
+        self.statusBar().clearMessage()
+        self.btn_generate.setEnabled(True)
+        self.btn_preview.setEnabled(True)
+        
+        # 如果检查失败，询问用户是否继续
+        reply = QMessageBox.question(
+            self, 
+            "检查失败", 
+            f"无法检查字符是否存在：\n{error_msg}\n\n是否跳过检查继续生成？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # 跳过检查，直接生成
+            if hasattr(self, '_pending_save_file'):
+                if self._pending_save_file:
+                    self.do_build()
+                else:
+                    self.do_preview()
+
+    def do_build(self):
+        """实际执行生成操作"""
+        font = self.le_font.text().strip()
+        symbols = self.le_sym.text()
+        
+        # 字符去重
+        original_len = len(symbols)
+        deduped_symbols = ''.join(dict.fromkeys(symbols))
+        total_removed = len(symbols) - len(deduped_symbols)
+        
+        # 更新输入框
+        if deduped_symbols != symbols:
+            self.le_sym.setText(deduped_symbols)
+            symbols = deduped_symbols
+        
+        # Windows 特殊字符过滤
+        if sys.platform == "win32":
+            problematic_chars = set('><|&^')
+            removed = [c for c in symbols if c in problematic_chars]
+            if removed:
+                filtered = ''.join(c for c in symbols if c not in problematic_chars)
+                symbols = filtered
+                self.le_sym.setText(filtered)
+                total_removed += len(removed)
+        
+        # 存储去重信息
+        dedup_info = {
+            'removed': total_removed,
+            'original_len': original_len,
+            'new_len': len(symbols)
+        }
+        
+        self._build_thread = BuildThread(
+            font,
+            self.sp_size.value(),
+            int(self.cb_bpp.currentText()),
+            symbols,
+            save_file=True,
+            compress=self.cb_compress.isChecked(),
+            dedup_info=dedup_info
+        )
+        self._build_thread.finished.connect(self.on_built)
+        self._build_thread.error.connect(self.on_error)
+        self._build_thread.start()
+
+    def do_preview(self):
+        """实际执行预览操作"""
+        font = self.le_font.text().strip()
+        symbols = self.le_sym.text()
+        
+        # 字符去重
+        deduped_symbols = ''.join(dict.fromkeys(symbols))
+        if deduped_symbols != symbols:
+            self.le_sym.setText(deduped_symbols)
+            symbols = deduped_symbols
+            QMessageBox.information(self, "提示", 
+                f"已自动去除重复字符\n\n"
+                f"原字符数: {len(symbols)}\n"
+                f"去重后: {len(deduped_symbols)} 个")
+        
+        # Windows 特殊字符过滤
+        if sys.platform == "win32":
+            problematic_chars = set('><|&^')
+            removed = [c for c in symbols if c in problematic_chars]
+            if removed:
+                filtered = ''.join(c for c in symbols if c not in problematic_chars)
+                QMessageBox.information(self, "提示", 
+                    f"以下字符无法处理，已自动移除：\n{''.join(set(removed))}")
+                symbols = filtered
+                self.le_sym.setText(filtered)
+        
+        self._build_thread = BuildThread(
+            font,
+            self.sp_size.value(),
+            int(self.cb_bpp.currentText()),
+            symbols,
+            save_file=False,
+            compress=False
+        )
+        self._build_thread.finished.connect(self.on_preview_done)
+        self._build_thread.error.connect(self.on_preview_error)
+        self._build_thread.start()
 
     def on_error(self, msg):
         # self.set_status(f"✘  {msg}", "err")
