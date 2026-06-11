@@ -1413,16 +1413,18 @@ class FontTool(QMainWindow):
     # ─────────────────────────────────────────────
     def make_header(self, tmp_file, out_dir, final_symbols=None):
         raw_name = os.path.splitext(os.path.basename(self.le_font.text()))[0]
-        # 转换为合法的C标识符作为文件名基础
-        name = sanitize_c_identifier(raw_name)
+        # 转换为合法的C标识符作为基础名
+        base_name = sanitize_c_identifier(raw_name)
         compress = self.cb_compress.isChecked()
         
+        # 完整前缀 = 基础名 + 字号 + (可选压缩标记)
         if compress:
-            suffix = f"{self.sp_size.value()}px_compressed"
+            prefix = f"{base_name}_{self.sp_size.value()}px_compressed"
         else:
-            suffix = f"{self.sp_size.value()}px"
+            prefix = f"{base_name}_{self.sp_size.value()}px"
         
-        out = os.path.join(out_dir, f"{name}_{suffix}.h")
+        # 文件名也使用完整前缀
+        out = os.path.join(out_dir, f"{prefix}.h")
 
         with open(tmp_file, "r", encoding="utf-8") as f:
             content = f.read()
@@ -1621,65 +1623,65 @@ class FontTool(QMainWindow):
             f.write("#include <string.h>\n\n")
             
             # ══════════════════════════════════════════════════════
-            #  字体参数宏定义
+            #  字体参数宏定义（使用 prefix 作为前缀）
             # ══════════════════════════════════════════════════════
             f.write("/** @defgroup font_params 字体参数宏定义 */\n")
             f.write(f"/** @brief 字体像素深度 (Bits Per Pixel) */\n")
-            f.write(f"#define FONT_BPP          {bpp}\n\n")
+            f.write(f"#define {prefix}_BPP          {bpp}\n\n")
             
             f.write(f"/** @brief 字体大小 (像素) */\n")
-            f.write(f"#define FONT_SIZE_PX      {font_size_px}\n\n")
+            f.write(f"#define {prefix}_SIZE_PX      {font_size_px}\n\n")
             
             f.write(f"/** @brief 行高 (像素，含上下边距) */\n")
-            f.write(f"#define FONT_LINE_HEIGHT  {line_height}\n\n")
+            f.write(f"#define {prefix}_LINE_HEIGHT  {line_height}\n\n")
 
             f.write(f"/** @brief 基线以上高度 (行顶到基线的像素数) */\n")
-            f.write(f"#define FONT_ASCENT       {ascent}\n\n")
+            f.write(f"#define {prefix}_ASCENT       {ascent}\n\n")
 
             f.write(f"/** @brief 基线以下高度 (descent) */\n")
-            f.write(f"#define FONT_DESCENT      {base_line}\n\n")
+            f.write(f"#define {prefix}_DESCENT      {base_line}\n\n")
 
             f.write(f"/** @brief 字符数量 */\n")
-            f.write(f"#define FONT_CHAR_COUNT   {char_count}\n\n")
+            f.write(f"#define {prefix}_CHAR_COUNT   {char_count}\n\n")
             
             if compress:
                 f.write(f"/** @brief 点阵数据原始大小 (解压后字节数) */\n")
-                f.write(f"#define FONT_BITMAP_SIZE  {real_bitmap_size}\n\n")
+                f.write(f"#define {prefix}_BITMAP_SIZE  {real_bitmap_size}\n\n")
                 
                 f.write(f"/** @brief 压缩数据大小 (字节) */\n")
-                f.write(f"#define FONT_COMPRESSED_SIZE {compressed_size}\n\n")
+                f.write(f"#define {prefix}_COMPRESSED_SIZE {compressed_size}\n\n")
             else:
                 f.write(f"/** @brief 点阵数据大小 (字节) */\n")
-                f.write(f"#define FONT_BITMAP_SIZE  {original_bitmap_size}\n\n")
+                f.write(f"#define {prefix}_BITMAP_SIZE  {original_bitmap_size}\n\n")
             
             # 像素掩码和移位宏
             ppb = 8 // bpp
             pixel_mask = (1 << bpp) - 1
             
             f.write(f"/** @brief 每字节像素数 */\n")
-            f.write(f"#define FONT_PIXELS_PER_BYTE {ppb}\n\n")
+            f.write(f"#define {prefix}_PIXELS_PER_BYTE {ppb}\n\n")
             
             f.write(f"/** @brief 像素值掩码 */\n")
-            f.write(f"#define FONT_PIXEL_MASK      0x{pixel_mask:02X}\n\n")
+            f.write(f"#define {prefix}_PIXEL_MASK      0x{pixel_mask:02X}\n\n")
             
             if bpp == 1:
                 f.write("/** @brief 提取像素值 (BPP=1) */\n")
-                f.write("#define FONT_GET_PIXEL(byte, pos) (((byte) >> (7 - (pos))) & 0x01)\n\n")
+                f.write(f"#define {prefix}_GET_PIXEL(byte, pos) (((byte) >> (7 - (pos))) & 0x01)\n\n")
             elif bpp == 2:
                 f.write("/** @brief 提取像素值 (BPP=2) */\n")
-                f.write("#define FONT_GET_PIXEL(byte, pos) (((byte) >> (6 - (pos) * 2)) & 0x03)\n\n")
+                f.write(f"#define {prefix}_GET_PIXEL(byte, pos) (((byte) >> (6 - (pos) * 2)) & 0x03)\n\n")
             elif bpp == 4:
                 f.write("/** @brief 提取像素值 (BPP=4) */\n")
-                f.write("#define FONT_GET_PIXEL(byte, pos) (((byte) >> (4 - (pos) * 4)) & 0x0F)\n\n")
+                f.write(f"#define {prefix}_GET_PIXEL(byte, pos) (((byte) >> (4 - (pos) * 4)) & 0x0F)\n\n")
             elif bpp == 8:
                 f.write("/** @brief 提取像素值 (BPP=8) */\n")
-                f.write("#define FONT_GET_PIXEL(byte, pos) (byte)\n\n")
+                f.write(f"#define {prefix}_GET_PIXEL(byte, pos) (byte)\n\n")
             
             # ══════════════════════════════════════════════════════
             #  Unicode 字符编码数组
             # ══════════════════════════════════════════════════════
             f.write("/** @brief Unicode 字符编码数组 (与 glyph_dsc 索引对应) */\n")
-            f.write(f"static const uint32_t unicode_list[{char_count}] = {{\n")
+            f.write(f"static const uint32_t {prefix}_unicode_list[{char_count}] = {{\n")
             for i in range(0, len(unicode_list), 8):
                 line = ", ".join(f"0x{code:04X}" for code in unicode_list[i:i+8])
                 if i + 8 < len(unicode_list):
@@ -1690,17 +1692,9 @@ class FontTool(QMainWindow):
             
             # 字符描述符结构体
             f.write("/**\n")
-            f.write(" * @brief 字符描述符结构体\n")
+            f.write(" * @brief 字符描述符结构体 (需自行定义)\n")
             f.write(" * @note  ofs_y 为行顶部相对值（向下为正），渲染时直接用 y + ofs_y + row\n")
-            f.write(" */\n")
-            f.write("typedef struct {\n"
-                    "    uint32_t bitmap_index;  /**< 点阵数据索引 */\n"
-                    "    uint32_t adv_w;         /**< 字符宽度 + 间距 */\n"
-                    "    uint16_t box_w;         /**< 点阵宽度 */\n"
-                    "    uint16_t box_h;         /**< 点阵高度 */\n"
-                    "    int16_t  ofs_x;         /**< X 轴偏移 */\n"
-                    "    int16_t  ofs_y;         /**< Y 轴偏移 (行顶部相对值，向下为正) */\n"
-                    "} GlyphDsc;\n\n")
+            f.write("\n\n")
             
             # ══════════════════════════════════════════════════════
             #  点阵数据
@@ -1741,7 +1735,7 @@ class FontTool(QMainWindow):
                 
                 # 压缩数据
                 f.write(f"/** @brief RLE 压缩点阵数据 ({compressed_size} Bytes, 原始 {original_bitmap_size} Bytes) */\n")
-                f.write(f"static const uint8_t glyph_bitmap_compressed[{compressed_size}] = {{\n")
+                f.write(f"static const uint8_t {prefix}_glyph_bitmap_compressed[{compressed_size}] = {{\n")
                 for i in range(0, len(compressed_bytes), 16):
                     line = ", ".join(f"0x{b:02X}" for b in compressed_bytes[i:i+16])
                     if i + 16 < len(compressed_bytes):
@@ -1753,7 +1747,7 @@ class FontTool(QMainWindow):
             else:
                 # 未压缩数据
                 f.write(f"/** @brief 点阵数据 ({original_bitmap_size} Bytes) */\n")
-                f.write(f"static const uint8_t glyph_bitmap[{original_bitmap_size}] = {{\n")
+                f.write(f"static const uint8_t {prefix}_glyph_bitmap[{original_bitmap_size}] = {{\n")
                 hex_values = re.findall(r"0x[0-9a-fA-F]+", bitmap_hex)
                 for i in range(0, len(hex_values), 16):
                     line = ", ".join(hex_values[i:i+16])
@@ -1767,7 +1761,7 @@ class FontTool(QMainWindow):
             #  字符描述符数组（ofs_y 已转换为行顶部相对值）
             # ══════════════════════════════════════════════════════
             f.write(f"/** @brief 字符描述符数组 ({char_count} 个字符，ofs_y 已转换为行顶部相对值) */\n")
-            f.write(f"static const GlyphDsc glyph_dsc[{char_count}] = {{\n")
+            f.write(f"static const GlyphDsc {prefix}_glyph_dsc[{char_count}] = {{\n")
             for i, entry_clean in enumerate(fixed_dsc_entries):
                 comma = "," if i < len(fixed_dsc_entries) - 1 else ""
                 f.write(f"    {entry_clean}{comma}\n")
@@ -1781,9 +1775,9 @@ class FontTool(QMainWindow):
             f.write(" * @param unicode Unicode 字符编码\n")
             f.write(" * @return 字形索引，未找到返回 -1\n")
             f.write(" */\n")
-            f.write("static inline int16_t font_find_char(uint32_t unicode) {\n")
-            f.write("    for (int16_t i = 0; i < FONT_CHAR_COUNT; i++) {\n")
-            f.write("        if (unicode_list[i] == unicode) {\n")
+            f.write(f"static inline int16_t {prefix}_find_char(uint32_t unicode) {{\n")
+            f.write(f"    for (int16_t i = 0; i < {prefix}_CHAR_COUNT; i++) {{\n")
+            f.write(f"        if ({prefix}_unicode_list[i] == unicode) {{\n")
             f.write("            return i;\n")
             f.write("        }\n")
             f.write("    }\n")
@@ -1791,36 +1785,36 @@ class FontTool(QMainWindow):
             f.write("}\n\n")
             
             # ══════════════════════════════════════════════════════
-            #  使用示例
+            #  使用示例（使用 prefix 作为前缀）
             # ══════════════════════════════════════════════════════
             if compress:
                 f.write("/**\n")
                 f.write(" * @brief 使用示例（固件端）\n")
                 f.write(" * \n")
                 f.write(" * // 1. 分配解压缓冲区（可复用）\n")
-                f.write(" * static uint8_t glyph_buffer[FONT_BITMAP_SIZE];\n")
+                f.write(f" * static uint8_t glyph_buffer[{prefix}_BITMAP_SIZE];\n")
                 f.write(" * \n")
                 f.write(" * // 2. 初始化时解压一次\n")
                 f.write(" * void font_init(void) {\n")
-                f.write(" *     glyph_decompress(glyph_bitmap_compressed, glyph_buffer);\n")
+                f.write(f" *     glyph_decompress({prefix}_glyph_bitmap_compressed, glyph_buffer);\n")
                 f.write(" * }\n")
                 f.write(" * \n")
                 f.write(" * // 3. 渲染时使用\n")
                 f.write(" * //    x, y 为行顶部左上角坐标\n")
                 f.write(" * //    ofs_y 已是行顶部相对值，直接相加即可，无需基线换算\n")
                 f.write(" * void draw_char(uint32_t unicode, int x, int y) {\n")
-                f.write(" *     int16_t idx = font_find_char(unicode);\n")
+                f.write(f" *     int16_t idx = {prefix}_find_char(unicode);\n")
                 f.write(" *     if (idx < 0) return;\n")
                 f.write(" * \n")
-                f.write(" *     const GlyphDsc *dsc = &glyph_dsc[idx];\n")
+                f.write(f" *     const GlyphDsc *dsc = &{prefix}_glyph_dsc[idx];\n")
                 f.write(" *     const uint8_t *bitmap = &glyph_buffer[dsc->bitmap_index];\n")
                 f.write(" * \n")
                 f.write(" *     for (int row = 0; row < dsc->box_h; row++) {\n")
                 f.write(" *         for (int col = 0; col < dsc->box_w; col++) {\n")
                 f.write(" *             int pixel_idx = row * dsc->box_w + col;\n")
-                f.write(" *             int byte_idx  = pixel_idx / FONT_PIXELS_PER_BYTE;\n")
-                f.write(" *             int bit_pos   = pixel_idx % FONT_PIXELS_PER_BYTE;\n")
-                f.write(" *             uint8_t pixel = FONT_GET_PIXEL(bitmap[byte_idx], bit_pos);\n")
+                f.write(f" *             int byte_idx  = pixel_idx / {prefix}_PIXELS_PER_BYTE;\n")
+                f.write(f" *             int bit_pos   = pixel_idx % {prefix}_PIXELS_PER_BYTE;\n")
+                f.write(f" *             uint8_t pixel = {prefix}_GET_PIXEL(bitmap[byte_idx], bit_pos);\n")
                 f.write(" *             if (pixel > 0) {\n")
                 f.write(" *                 draw_pixel(x + dsc->ofs_x + col,\n")
                 f.write(" *                            y + dsc->ofs_y + row, pixel);\n")
@@ -1836,18 +1830,18 @@ class FontTool(QMainWindow):
                 f.write(" * //    x, y 为行顶部左上角坐标\n")
                 f.write(" * //    ofs_y 已是行顶部相对值，直接相加即可，无需基线换算\n")
                 f.write(" * void draw_char(uint32_t unicode, int x, int y) {\n")
-                f.write(" *     int16_t idx = font_find_char(unicode);\n")
+                f.write(f" *     int16_t idx = {prefix}_find_char(unicode);\n")
                 f.write(" *     if (idx < 0) return;\n")
                 f.write(" * \n")
-                f.write(" *     const GlyphDsc *dsc = &glyph_dsc[idx];\n")
-                f.write(" *     const uint8_t *bitmap = &glyph_bitmap[dsc->bitmap_index];\n")
+                f.write(f" *     const GlyphDsc *dsc = &{prefix}_glyph_dsc[idx];\n")
+                f.write(f" *     const uint8_t *bitmap = &{prefix}_glyph_bitmap[dsc->bitmap_index];\n")
                 f.write(" * \n")
                 f.write(" *     for (int row = 0; row < dsc->box_h; row++) {\n")
                 f.write(" *         for (int col = 0; col < dsc->box_w; col++) {\n")
                 f.write(" *             int pixel_idx = row * dsc->box_w + col;\n")
-                f.write(" *             int byte_idx  = pixel_idx / FONT_PIXELS_PER_BYTE;\n")
-                f.write(" *             int bit_pos   = pixel_idx % FONT_PIXELS_PER_BYTE;\n")
-                f.write(" *             uint8_t pixel = FONT_GET_PIXEL(bitmap[byte_idx], bit_pos);\n")
+                f.write(f" *             int byte_idx  = pixel_idx / {prefix}_PIXELS_PER_BYTE;\n")
+                f.write(f" *             int bit_pos   = pixel_idx % {prefix}_PIXELS_PER_BYTE;\n")
+                f.write(f" *             uint8_t pixel = {prefix}_GET_PIXEL(bitmap[byte_idx], bit_pos);\n")
                 f.write(" *             if (pixel > 0) {\n")
                 f.write(" *                 draw_pixel(x + dsc->ofs_x + col,\n")
                 f.write(" *                            y + dsc->ofs_y + row, pixel);\n")
@@ -1856,8 +1850,8 @@ class FontTool(QMainWindow):
                 f.write(" *     }\n")
                 f.write(" * }\n")
                 f.write(" */\n")
-        
-        return out
+            
+            return out
 
 # ══════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
