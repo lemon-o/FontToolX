@@ -1397,8 +1397,20 @@ class FontTool(QMainWindow):
         mono = config.get("mono", True)
         self.cb_mono.setChecked(mono)
 
+        symbols = config.get("symbols", "")
+        if symbols:
+            # 加载时也清理一遍，确保数据干净
+            symbols = symbols.strip()
+            symbols = re.sub(r'\s+', '', symbols)
+            self.le_sym.setText(symbols)
+
     def save_settings(self):
         """保存当前设置到配置文件"""
+        # 清理字符集
+        symbols_raw = self.le_sym.text()
+        symbols_clean = symbols_raw.strip()
+        symbols_clean = re.sub(r'\s+', '', symbols_clean)
+        
         config = {
             "font_path": self.le_font.text().strip(),
             "font_size": self.sp_size.value(),
@@ -1406,7 +1418,7 @@ class FontTool(QMainWindow):
             "output_dir": self.le_out.text().strip(),
             "preview_w": self.sp_pw.value(),
             "preview_h": self.sp_ph.value(),
-            "symbols": self.le_sym.text(),
+            "symbols": symbols_clean,                    # 保存清理后的版本
             "compress": self.cb_compress.isChecked(),
             "mono": self.cb_mono.isChecked(), 
         }
@@ -1425,6 +1437,20 @@ class FontTool(QMainWindow):
             return
         if not check_lv_font_conv():
             QMessageBox.warning(self, "提示", "未找到 lv_font_conv，请在环境检测中安装")
+            return
+        
+        # 保存设置
+        self.save_settings()
+        
+        # 获取并清理字符（移除首尾空格和所有空白字符）
+        symbols_raw = self.le_sym.text()
+        symbols = symbols_raw.strip()              # 移除首尾空格
+        symbols = re.sub(r'\s+', '', symbols)      # 移除中间空格、换行、制表符等
+        if symbols != symbols_raw:
+            self.le_sym.setText(symbols)           # 更新输入框显示清理后的内容
+        
+        if not symbols:
+            QMessageBox.warning(self, "提示", "请输入要生成的字符")
             return
         
         # 保存设置
@@ -1519,7 +1545,13 @@ class FontTool(QMainWindow):
         
         self.save_settings()
         
-        symbols = self.le_sym.text()
+        # 获取并清理字符（移除首尾空格和所有空白字符）
+        symbols_raw = self.le_sym.text()
+        symbols = symbols_raw.strip()              # 移除首尾空格
+        symbols = re.sub(r'\s+', '', symbols)      # 移除中间空格、换行、制表符等
+        if symbols != symbols_raw:
+            self.le_sym.setText(symbols)           # 更新输入框显示清理后的内容
+        
         if not symbols:
             QMessageBox.warning(self, "提示", "请输入要生成的字符")
             return
@@ -1576,8 +1608,9 @@ class FontTool(QMainWindow):
                     seen.add(c)
                     unique_invalid.append(c)
             
-            # 更新输入框，移除无效字符
-            new_symbols = ''.join(valid_chars)
+            # 更新输入框，移除无效字符，同时清理空格
+            new_symbols = ''.join(valid_chars).strip()      # 移除首尾空格
+            new_symbols = re.sub(r'\s+', '', new_symbols)   # 移除中间空格
             self.le_sym.setText(new_symbols)
             
             # 构建提示消息（与去除重复字符样式一致）
@@ -1626,7 +1659,24 @@ class FontTool(QMainWindow):
     def do_build(self):
         """实际执行生成操作"""
         font = self.le_font.text().strip()
-        symbols = self.le_sym.text()
+        symbols_raw = self.le_sym.text()
+        
+        # 【新增】清理空白字符（首尾空格 + 中间空格、换行、制表符等）
+        symbols = symbols_raw.strip()              # 移除首尾空格
+        symbols = re.sub(r'\s+', '', symbols)      # 移除所有空白字符（包括中间空格）
+        
+        # 如果清理后有变化，更新输入框
+        if symbols != symbols_raw:
+            self.le_sym.setText(symbols)
+            QMessageBox.information(self, "提示", 
+                f"已自动移除空白字符\n\n"
+                f"原内容: {repr(symbols_raw)}\n"
+                f"清理后: {symbols}")
+        
+        # 如果没有有效字符，提示错误
+        if not symbols:
+            QMessageBox.warning(self, "提示", "请输入要生成的字符（已自动清理所有空白字符）")
+            return
         
         # 字符去重
         original_len = len(symbols)
@@ -1647,6 +1697,11 @@ class FontTool(QMainWindow):
                 symbols = filtered
                 self.le_sym.setText(filtered)
                 total_removed += len(removed)
+        
+        # 再次检查清理后是否有有效字符
+        if not symbols:
+            QMessageBox.warning(self, "提示", "所有字符均无效，无法生成字库")
+            return
         
         # 存储去重信息
         dedup_info = {
@@ -1672,7 +1727,24 @@ class FontTool(QMainWindow):
     def do_preview(self):
         """实际执行预览操作"""
         font = self.le_font.text().strip()
-        symbols = self.le_sym.text()
+        symbols_raw = self.le_sym.text()
+        
+        # 【新增】清理空白字符（首尾空格 + 中间空格、换行、制表符等）
+        symbols = symbols_raw.strip()              # 移除首尾空格
+        symbols = re.sub(r'\s+', '', symbols)      # 移除所有空白字符（包括中间空格）
+        
+        # 如果清理后有变化，更新输入框
+        if symbols != symbols_raw:
+            self.le_sym.setText(symbols)
+            QMessageBox.information(self, "提示", 
+                f"已自动移除空白字符\n\n"
+                f"原内容: {repr(symbols_raw)}\n"
+                f"清理后: {symbols}")
+        
+        # 如果没有有效字符，提示错误
+        if not symbols:
+            QMessageBox.warning(self, "提示", "请输入要生成的字符（已自动清理所有空白字符）")
+            return
         
         # 字符去重
         deduped_symbols = ''.join(dict.fromkeys(symbols))
@@ -1694,6 +1766,11 @@ class FontTool(QMainWindow):
                     f"以下字符无法处理，已自动移除：\n{''.join(set(removed))}")
                 symbols = filtered
                 self.le_sym.setText(filtered)
+        
+        # 再次检查清理后是否有有效字符
+        if not symbols:
+            QMessageBox.warning(self, "提示", "所有字符均无效，无法生成预览")
+            return
         
         self._build_thread = BuildThread(
             font,
