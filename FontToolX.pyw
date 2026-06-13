@@ -124,6 +124,16 @@ QGroupBox {
     padding-left: 14px;
     padding-right: 14px;
 }
+QGroupBox, QGroupBox:!active {
+    background: transparent;
+    border: 1px solid #2e2e45;
+    border-radius: 10px;
+    margin-top: 22px;
+    padding-top: 16px;
+    padding-bottom: 12px;
+    padding-left: 14px;
+    padding-right: 14px;
+}
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
@@ -807,7 +817,8 @@ class BuildThread(QThread):
     finished = pyqtSignal(str, bool)
     error    = pyqtSignal(str)
 
-    def __init__(self, font, size, bpp, symbols, save_file=False, compress=False, dedup_info=None):
+    # 1. 构造函数新增 mono 参数
+    def __init__(self, font, size, bpp, symbols, save_file=False, compress=False, dedup_info=None, mono=True):
         super().__init__()
         self.font = font
         self.size = size
@@ -816,6 +827,71 @@ class BuildThread(QThread):
         self.save_file = save_file
         self.compress = compress
         self.dedup_info = dedup_info
+        self.mono = mono
+
+    # 2. 处理等宽逻辑
+    def _apply_monospace(self, content, target_chars="0123456789"):
+        unicode_match = re.search(r'unicode_list.*?\[.*?\]\s*=\s*\{([^}]+)\}', content, re.S)
+        if not unicode_match: return content
+
+        unicode_str = unicode_match.group(1).replace('\n', '').replace(' ', '')
+        unicodes = [int(x, 16) if x.startswith('0x') else int(x) 
+                    for x in unicode_str.split(',') if x]
+        
+        target_unicodes = [ord(c) for c in target_chars]
+        target_indices = [i for i, u in enumerate(unicodes) if u in target_unicodes]
+        if not target_indices: return content
+
+        gd_start = re.search(r'glyph_dsc\b[^=]*=\s*\{', content)
+        if not gd_start: return content
+
+        # 从 { 开始，手动找配对的 }; （计数花括号深度）
+        brace_start = gd_start.end() - 1   # 指向开头的 {
+        depth = 0
+        pos = brace_start
+        while pos < len(content):
+            if content[pos] == '{':
+                depth += 1
+            elif content[pos] == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+            pos += 1
+        
+        gd_inner = content[brace_start + 1 : pos]      # { ... } 之间的内容
+        gd_prefix_str = content[gd_start.start() : brace_start + 1]
+        gd_suffix_str = content[pos : pos + 2]          # };
+
+        # 提取每个条目
+        entry_pat = re.compile(
+            r'(\{[^}]*\.adv_w\s*=\s*)(\d+)([^}]*\.ofs_x\s*=\s*)(-?\d+)([^}]*\})'
+        )
+        entries = list(entry_pat.finditer(gd_inner))
+
+        # 计算目标字符中最大 adv_w
+        max_adv_w = max(
+            (int(entries[idx].group(2)) for idx in target_indices if idx < len(entries)),
+            default=0
+        )
+        if max_adv_w == 0: return content
+
+        # 反向替换避免偏移失效
+        new_inner = gd_inner
+        for idx in sorted(target_indices, reverse=True):
+            if idx >= len(entries): continue
+            match = entries[idx]
+            old_adv_w = int(match.group(2))
+            if old_adv_w == max_adv_w: continue
+            
+            diff = max_adv_w - old_adv_w
+            new_ofs_x = int(match.group(4)) + (diff // 2)
+            new_entry = (match.group(1) + str(max_adv_w) +
+                        match.group(3) + str(new_ofs_x) + match.group(5))
+            new_inner = new_inner[:match.start()] + new_entry + new_inner[match.end():]
+
+        return (content[:gd_start.start()] + 
+                gd_prefix_str + new_inner + 
+                content[pos:])
 
     def run(self):
         import tempfile
@@ -823,11 +899,9 @@ class BuildThread(QThread):
         tmp = os.path.join(tmp_dir, "tmp_font.c")
         
         try:
-            #过滤字体中不存在的字符
             from fontTools.ttLib import TTFont
             tt = TTFont(self.font)
 
-            # 合并所有 cmap 表的字符覆盖，避免遗漏非标准编码
             all_codepoints = set()
             for table in tt['cmap'].tables:
                 all_codepoints.update(table.cmap.keys())
@@ -835,16 +909,17 @@ class BuildThread(QThread):
             if all_codepoints:
                 missing = [c for c in self.symbols if ord(c) not in all_codepoints]
                 if missing:
-                    self.warning.emit(f"以下字符在字体中不存在，已自动排除：{''.join(missing)}")
+                    pass # 原有的警告逻辑，或省略
                 filtered_symbols = ''.join(c for c in self.symbols if ord(c) in all_codepoints)
             
             lv = shutil.which("lv_font_conv") or "lv_font_conv"
 
             cmd = [
-                lv, "--font", self.font,
+                lv, 
+                "--font", self.font,
                 "--size", str(self.size),
                 "--bpp",  str(self.bpp),
-                f"--symbols={self.symbols}",   # 用等号形式，避免 - 开头被误判为选项
+                f"--symbols={self.symbols}",
                 "--format", "lvgl",
                 "-o", tmp
             ]
@@ -857,6 +932,7 @@ class BuildThread(QThread):
             
             if r.returncode != 0:
                 raise RuntimeError(r.stderr.strip() or "lv_font_conv 返回错误")
+                    
             self.finished.emit(tmp, self.save_file)
         except Exception as e:
             self.error.emit(str(e))
@@ -1155,6 +1231,14 @@ class FontTool(QMainWindow):
         self.lbl_compress_info.setObjectName("tag_section")
         self.lbl_compress_info.setVisible(False)
         row_compress.addWidget(self.lbl_compress_info)
+        
+        # === 数字等宽复选框 ===
+        self.cb_mono = QCheckBox("数字等宽")
+        self.cb_mono.setToolTip("将【0-9】转为等宽并居中，适用于制作时钟界面时避免数字变化时左右跳动。")
+        self.cb_mono.setChecked(True) # 默认勾选
+        row_compress.addWidget(self.cb_mono)
+        # =======================
+        
         row_compress.addStretch()
         gi.addLayout(row_compress)
         
@@ -1202,6 +1286,7 @@ class FontTool(QMainWindow):
 
         # 加载配置
         self.load_settings()
+        self.statusBar().showMessage(" ")
         
         # 启动后自动检测环境
         QTimer.singleShot(200, self.auto_env_check)
@@ -1307,6 +1392,10 @@ class FontTool(QMainWindow):
         # 加载压缩选项
         compress = config.get("compress", False)
         self.cb_compress.setChecked(compress)
+        
+        # === 加载等宽选项 ===
+        mono = config.get("mono", True)
+        self.cb_mono.setChecked(mono)
 
     def save_settings(self):
         """保存当前设置到配置文件"""
@@ -1319,6 +1408,7 @@ class FontTool(QMainWindow):
             "preview_h": self.sp_ph.value(),
             "symbols": self.le_sym.text(),
             "compress": self.cb_compress.isChecked(),
+            "mono": self.cb_mono.isChecked(), 
         }
         save_config(config)
 
@@ -1572,7 +1662,8 @@ class FontTool(QMainWindow):
             symbols,
             save_file=True,
             compress=self.cb_compress.isChecked(),
-            dedup_info=dedup_info
+            dedup_info=dedup_info,
+            mono=self.cb_mono.isChecked()
         )
         self._build_thread.finished.connect(self.on_built)
         self._build_thread.error.connect(self.on_error)
@@ -1610,7 +1701,8 @@ class FontTool(QMainWindow):
             int(self.cb_bpp.currentText()),
             symbols,
             save_file=False,
-            compress=False
+            compress=False,
+            mono=self.cb_mono.isChecked()
         )
         self._build_thread.finished.connect(self.on_preview_done)
         self._build_thread.error.connect(self.on_preview_error)
@@ -1636,9 +1728,8 @@ class FontTool(QMainWindow):
         font_name = os.path.splitext(os.path.basename(self.le_font.text()))[0]
         title = f"点阵预览 — {font_name} {self.sp_size.value()}px"
 
-        self._preview_win = PreviewDialog(self._last_pixmap, w, h, title, parent=self)
+        self._preview_win = PreviewDialog(self._last_pixmap, w, h, title, parent=None)
         self._preview_win.show()
-
     # ─────────────────────────────────────────────
     def make_header(self, tmp_file, out_dir, final_symbols=None):
         raw_name = os.path.splitext(os.path.basename(self.le_font.text()))[0]
@@ -1792,6 +1883,46 @@ class FontTool(QMainWindow):
             converted_dsc_entries.append(entry)
 
         fixed_dsc_entries = converted_dsc_entries
+
+        # ══════════════════════════════════════════════════════
+        #  等宽后处理：统一数字/符号的 adv_w，居中补偿 ofs_x
+        #
+        #  注意单位：
+        #    adv_w  单位是 1/16 px（LVGL 内部格式）
+        #    ofs_x  单位是 px（像素，直接用于 draw_pixel 坐标）
+        #  因此居中补偿必须先把 adv_w 差值 >>4 转换为像素再除以2
+        # ══════════════════════════════════════════════════════
+        if self.cb_mono.isChecked():
+            _target_unicodes = set(ord(c) for c in "0123456789")
+            _target_indices  = [i for i, u in enumerate(unicode_list) if u in _target_unicodes]
+            _adv_pat = re.compile(r'(\.adv_w\s*=\s*)(\d+)')
+            _ofx_pat = re.compile(r'(\.ofs_x\s*=\s*)(-?\d+)')
+
+            _max_adv = 0
+            for _idx in _target_indices:
+                if _idx < len(fixed_dsc_entries):
+                    _m = _adv_pat.search(fixed_dsc_entries[_idx])
+                    if _m:
+                        _max_adv = max(_max_adv, int(_m.group(2)))
+
+            if _max_adv > 0:
+                for _idx in _target_indices:
+                    if _idx >= len(fixed_dsc_entries): continue
+                    _entry = fixed_dsc_entries[_idx]
+                    _m_adv = _adv_pat.search(_entry)
+                    _m_ofx = _ofx_pat.search(_entry)
+                    if not _m_adv: continue
+                    _old_adv = int(_m_adv.group(2))
+                    if _old_adv == _max_adv: continue
+                    # adv_w 差值转为像素后居中
+                    _diff_px = (_max_adv - _old_adv) >> 4
+                    _entry = _adv_pat.sub(lambda m: m.group(1) + str(_max_adv), _entry)
+                    if _m_ofx:
+                        _old_ofx = int(_m_ofx.group(2))
+                        _entry = _ofx_pat.sub(
+                            lambda m, v=_old_ofx + _diff_px // 2: m.group(1) + str(v), _entry
+                        )
+                    fixed_dsc_entries[_idx] = _entry
 
         # 格式化函数
         def format_size(size_bytes):
@@ -1995,7 +2126,43 @@ class FontTool(QMainWindow):
                 comma = "," if i < len(fixed_dsc_entries) - 1 else ""
                 f.write(f"    {entry_clean}{comma}\n")
             f.write("};\n\n")
-            
+
+            if self.cb_mono.isChecked():
+                target_chars = "0123456789"
+                target_unicodes = set(ord(c) for c in target_chars)
+                
+                # 找出目标字符对应的条目索引（unicode_list 含 0x0000 哨兵，与 glyph_dsc 1:1 对应）
+                target_indices = [i for i, u in enumerate(unicode_list) if u in target_unicodes]
+                
+                # 从 fixed_dsc_entries 里提取这些条目的 adv_w，取最大值
+                adv_w_pat = re.compile(r'\.adv_w\s*=\s*(\d+)')
+                ofs_x_pat = re.compile(r'\.ofs_x\s*=\s*(-?\d+)')
+                
+                max_adv = 0
+                for idx in target_indices:
+                    if idx < len(fixed_dsc_entries):
+                        m = adv_w_pat.search(fixed_dsc_entries[idx])
+                        if m:
+                            max_adv = max(max_adv, int(m.group(1)))
+                
+                if max_adv > 0:
+                    new_entries = list(fixed_dsc_entries)
+                    for idx in target_indices:
+                        if idx >= len(new_entries): continue
+                        entry = new_entries[idx]
+                        m_adv = adv_w_pat.search(entry)
+                        m_ofx = ofs_x_pat.search(entry)
+                        if not m_adv: continue
+                        old_adv = int(m_adv.group(1))
+                        if old_adv == max_adv: continue
+                        diff = max_adv - old_adv
+                        entry = adv_w_pat.sub(f'.adv_w = {max_adv}', entry)
+                        if m_ofx:
+                            old_ofx = int(m_ofx.group(1))
+                            entry = ofs_x_pat.sub(f'.ofs_x = {old_ofx + diff // 2}', entry)
+                        new_entries[idx] = entry
+                    fixed_dsc_entries = new_entries
+                    
             # ══════════════════════════════════════════════════════
             #  辅助查找函数
             # ══════════════════════════════════════════════════════
