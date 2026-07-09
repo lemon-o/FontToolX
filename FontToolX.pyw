@@ -1136,6 +1136,7 @@ class FontTool(QMainWindow):
         self._build_thread  = None
         self._last_pixmap   = None
         self._preview_win   = None
+        self._last_h_dir    = ""      # 上一次读取 .h 字库的目录（持久化到配置）
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -1189,6 +1190,18 @@ class FontTool(QMainWindow):
             b.clicked.connect(lambda _, t=text: self.le_sym.setText(t))
             row_pre.addWidget(b)
         row_pre.addStretch()
+
+        # 读取已生成的 .h 字库，回填其字符集，方便增减文字
+        btn_load_h = QPushButton("读取 .h 字库")
+        btn_load_h.setObjectName("btn_sm")
+        btn_load_h.setToolTip(
+            "读取本工具已生成的 .h 字库文件，\n"
+            "自动填入其字符集与生成参数（字号 / BPP / 压缩），\n"
+            "方便在此基础上增减文字后重新生成。"
+        )
+        btn_load_h.clicked.connect(self.load_header)
+        row_pre.addWidget(btn_load_h)
+
         gs.addLayout(row_pre)
         lay.addWidget(grp_sym)
 
@@ -1301,6 +1314,197 @@ class FontTool(QMainWindow):
         if d: self.le_out.setText(d)
 
     # ─────────────────────────────────────────────
+    def _find_font_file(self, font_name, extra_dirs=None):
+        """
+        根据字体文件名，在「字体所在文件夹」及常见目录中扫描查找对应字体文件。
+
+        查找目录（按优先级）：
+          1. 当前已选字体所在目录
+          2. 配置中记录的字体所在目录
+          3. 传入的额外目录（如 .h 文件所在目录）
+          4. 系统字体目录（Windows: C:\\Windows\\Fonts）
+        每个目录先做同名精确匹配，找不到再在其中递归查找（限深度，避免卡顿）。
+        返回匹配到的完整路径，找不到返回 None。
+        """
+        if not font_name:
+            return None
+        target = font_name.lower()
+
+        dirs = []
+        cur = self.le_font.text().strip()
+        if cur:
+            d = os.path.dirname(cur)
+            if d:
+                dirs.append(d)
+        try:
+            cfg = load_config() or {}
+            cfg_font = cfg.get("font_path", "")
+            if cfg_font:
+                d = os.path.dirname(cfg_font)
+                if d:
+                    dirs.append(d)
+        except Exception:
+            pass
+        if extra_dirs:
+            dirs.extend([d for d in extra_dirs if d])
+        if sys.platform.startswith("win"):
+            win_fonts = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+            dirs.append(win_fonts)
+
+        # 去重且保持顺序
+        seen = set()
+        uniq_dirs = []
+        for d in dirs:
+            key = os.path.normcase(os.path.abspath(d)) if d else d
+            if d and os.path.isdir(d) and key not in seen:
+                seen.add(key)
+                uniq_dirs.append(d)
+
+        # 1) 各目录同名精确匹配
+        for d in uniq_dirs:
+            cand = os.path.join(d, font_name)
+            if os.path.isfile(cand):
+                return cand
+
+        # 2) 各目录递归查找（限制深度，避免遍历过深卡顿）
+        for base in uniq_dirs:
+            base_depth = base.rstrip(os.sep).count(os.sep)
+            for root_dir, _sub, files in os.walk(base):
+                if root_dir.rstrip(os.sep).count(os.sep) - base_depth > 3:
+                    _sub[:] = []
+                    continue
+                for fn in files:
+                    if fn.lower() == target:
+                        return os.path.join(root_dir, fn)
+        return None
+
+    # ─────────────────────────────────────────────
+    def load_header(self):
+        """
+        读取本工具生成的 .h 字库文件，解析出字符集与生成参数并回填界面，
+        方便用户在原有字库基础上增减文字后重新生成。
+
+        解析优先级：
+          - 字符集   : 优先从 unicode_list 数组还原（结构化、最可靠），
+                       回退到头部注释里的“字符集:”行。
+          - 字号/BPP : 优先从 #define ..._SIZE_PX / ..._BPP 宏读取，
+                       回退到头部注释。
+          - 压缩     : 依据是否存在压缩相关宏 / 解压函数判断。
+        """
+        # 打开对话框时优先定位到上一次读取 .h 的目录
+        start_dir = self._last_h_dir if (self._last_h_dir and os.path.isdir(self._last_h_dir)) \
+            else (self.le_out.text().strip() or os.getcwd())
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择已生成的 .h 字库文件", start_dir, "C 头文件 (*.h)"
+        )
+        if not path:
+            return
+
+        # 记住本次目录，供下次默认打开
+        self._last_h_dir = os.path.dirname(path)
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            QMessageBox.critical(self, "读取失败", f"无法读取文件：\n{e}")
+            return
+
+        # ── 1. 解析字符集 ──
+        symbols = ""
+        ul_match = re.search(r"unicode_list\s*\[[^\]]*\]\s*=\s*\{(.*?)\}", content, re.S)
+        if ul_match:
+            codes = [int(h, 16) for h in re.findall(r"0x[0-9a-fA-F]+", ul_match.group(1))]
+            # index 0 是 LVGL 的空字模哨兵 (0x0000)，需要剔除
+            symbols = "".join(chr(c) for c in codes if c != 0)
+
+        if not symbols:
+            cm = re.search(r"字符集[:：]\s*(.*)", content)
+            if cm:
+                symbols = re.sub(r"\s+", "", cm.group(1).strip())
+
+        if not symbols:
+            QMessageBox.warning(
+                self, "提示",
+                "未能从该文件解析出字符集。\n"
+                "请确认所选文件是本工具生成的 .h 字库文件。"
+            )
+            return
+
+        # ── 2. 字号 ──
+        size = None
+        m = re.search(r"_SIZE_PX\s+(\d+)", content)
+        if m:
+            size = int(m.group(1))
+        else:
+            m = re.search(r"字体大小[:：]\s*(\d+)\s*px", content)
+            if m:
+                size = int(m.group(1))
+
+        # ── 3. BPP ──
+        bpp = None
+        m = re.search(r"_BPP\s+(\d+)", content)
+        if m:
+            bpp = int(m.group(1))
+        else:
+            m = re.search(r"像素深度[:：]\s*(\d+)\s*BPP", content)
+            if m:
+                bpp = int(m.group(1))
+
+        # ── 4. 是否压缩 ──
+        compress = ("_COMPRESSED_SIZE" in content) or \
+                   ("glyph_decompress" in content) or \
+                   ("RLE 压缩" in content)
+
+        # ── 5. 原字体文件名（仅用于一致性提示）──
+        font_name = None
+        m = re.search(r"字体文件[:：]\s*(.+)", content)
+        if m:
+            font_name = m.group(1).strip()
+
+        # ── 回填界面 ──
+        self.le_sym.setText(symbols)
+        if size and 6 <= size <= 256:
+            self.sp_size.setValue(size)
+        if bpp is not None:
+            idx = self.cb_bpp.findText(str(bpp))
+            if idx >= 0:
+                self.cb_bpp.setCurrentIndex(idx)
+        self.cb_compress.setChecked(compress)
+
+        # ── 字体文件：自动扫描并选中对应字体 ──
+        note = ""
+        if font_name:
+            cur = self.le_font.text().strip()
+            if cur and os.path.basename(cur).lower() == font_name.lower() and os.path.isfile(cur):
+                # 当前已选中的就是同一字体，无需处理
+                pass
+            else:
+                # 扫描字体所在文件夹 + .h 所在目录，尝试自动匹配同名字体
+                found = self._find_font_file(font_name, extra_dirs=[os.path.dirname(path)])
+                if found:
+                    self.le_font.setText(found)
+                    note = f"\n\n✓ 已自动匹配并选中字体文件：\n{found}"
+                else:
+                    note = (f"\n\n⚠ 该字库由字体「{font_name}」生成，"
+                            f"但未在字体目录中找到同名文件。\n"
+                            f"请手动选择同一字体文件后再重新生成，"
+                            f"否则新增字形可能与原字库不一致。")
+
+        self.save_settings()
+
+        QMessageBox.information(
+            self, "读取成功",
+            f"已载入字库参数：\n"
+            f"字符数量: {len(symbols)} 个\n"
+            f"字号: {size if size else '未知'} px\n"
+            f"像素深度: {bpp if bpp is not None else '未知'} BPP\n"
+            f"压缩: {'是' if compress else '否'}"
+            f"{note}\n\n"
+            f"现在可在上方字符集输入框中增减文字，然后点击【生成】重新导出。"
+        )
+
+    # ─────────────────────────────────────────────
     def on_compress_changed(self, state):
         """压缩复选框状态改变"""
         if state == Qt.Checked:
@@ -1397,6 +1601,9 @@ class FontTool(QMainWindow):
         mono = config.get("mono", True)
         self.cb_mono.setChecked(mono)
 
+        # 上一次读取 .h 字库的目录
+        self._last_h_dir = config.get("last_h_dir", "")
+
         symbols = config.get("symbols", "")
         if symbols:
             # 加载时也清理一遍，确保数据干净
@@ -1420,7 +1627,8 @@ class FontTool(QMainWindow):
             "preview_h": self.sp_ph.value(),
             "symbols": symbols_clean,                    # 保存清理后的版本
             "compress": self.cb_compress.isChecked(),
-            "mono": self.cb_mono.isChecked(), 
+            "mono": self.cb_mono.isChecked(),
+            "last_h_dir": getattr(self, "_last_h_dir", ""),   # 上一次读取 .h 的目录
         }
         save_config(config)
 
